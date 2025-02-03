@@ -2,6 +2,7 @@ program easyswitcher;
 
 {$mode objfpc}
 {$h+}
+{$notes off}
 
 uses
   cThreads,
@@ -14,23 +15,23 @@ uses
   Errors;
 
 type
-  input_event = record   //c-style struct input_event
+  // input.h struct input_event
+  input_event = record
     time: timeval;
     ie_type: cuint16;
     code: cuint16;
-    Value: cint32;
+    value: cint32;
   end;
 
-  input_id = record      //c-style struct input_id
-    bustype: cuint16;
-    vendor: cuint16;
-    product: cuint16;
-    version: cuint16;
-  end;
-
-  uinput_setup = record  //c-style struct uinput_setup
-    id: input_id;
-    Name: array[0..79] of char;
+  // uinput.h struct uinput_setup
+  uinput_setup = record
+    id: record
+      bustype: cuint16;
+      vendor: cuint16;
+      product: cuint16;
+      version: cuint16;
+      end;
+    name: array[0..79] of char;
     ff_effects_max: cuint32;
   end;
 
@@ -44,92 +45,79 @@ type
   TKeyBuf = array of input_event;
   TEmitBuf = array [1..2] of input_event;
   TBufferAction = (KeepBuffer, ReplaceAll, ReplaceWord);
-  TQueueSelector = (TCIFLUSH, TCOFLUSH, TCIOFLUSH);
 
 const
-  EASY_SWITCHER_VERSION = '0.3';
+  EASY_SWITCHER_VERSION = '0.4';
 
   SYSTEMD_UNIT_FILE = '/lib/systemd/system/easy-switcher.service';
   CONFIG_FILE = '/etc/easy-switcher/default.conf';
   INPUT_DEVICES_DIR = '/dev/input/';
   UINPUT_FILE = '/dev/uinput';
 
-  EV_SYN = $0000; //key events
-  EV_KEY = $0001;
-  SYN_REPORT = $0000;
+  // event types
+  EV_SYN = $00;
+  EV_KEY = $01;
 
-  UI_SET_EVBIT = $40045564;   // magic numbers
+  // synchronization event codes
+  SYN_REPORT = $00;
+
+  // bus types
+  BUS_USB = $03;
+
+  // ioctl commands
+  UI_SET_EVBIT = $40045564;
   UI_SET_KEYBIT = $40045565;
   UI_DEV_SETUP = $405C5503;
-  UI_DEV_CREATE = $5501;
-  UI_DEV_DESTROY = $5502;
-
-  BUS_USB = $0003;  //virtual keyboard bus
-
-  EINTR = $0004;  // Interrupted system call
-  EIO = $0005;    // I/O error
-
-  TCFLSH = $0000540B;
+  UI_DEV_CREATE = $00005501;
+  UI_DEV_DESTROY = $00005502;
 
   //keys to watch and replace
-  Letters = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18,
-    19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 30, 31, 32, 33, 34, 35,
-    36, 37, 38, 39, 40, 41, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52,
-    53, 55, 57, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 96, 98];
+  Letters = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+    25, 26, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 43, 44, 45, 46, 47, 48,
+    49, 50, 51, 52, 53, 55, 57, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 96, 98];
   Shifts = [42, 54];
   BufKillers = [15, 29, 56, 97, 100, 102, 103, 104, 105, 106, 107, 108, 109, 110];
 
   KEY_BACKSPACE: word = 14;    //Backspace
   KEY_SPACE: word = 57;        //Space
   KEY_ENTER: word = 28;        //Enter
+  KEY_KPENTER = 96;            //keypad Enter
 
   KeyName: array [0..248] of string =
-    ('RESERVED', 'ESC', '1', '2', '3', '4', '5', '6', '7',
-    '8', '9', '0', 'MINUS', 'EQUAL', 'BACKSPACE',
-    'TAB', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I',
-    'O', 'P', 'LEFTBRACE', 'RIGHTBRACE', 'ENTER', 'LEFTCTRL',
-    'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', 'SEMICOLON',
-    'APOSTROPHE', 'GRAVE', 'LEFTSHIFT', 'BACKSLASH', 'Z', 'X',
-    'C', 'V', 'B', 'N', 'M', 'COMMA', 'DOT', 'SLASH',
-    'RIGHTSHIFT', 'KPASTERISK', 'LEFTALT',
-    'SPACE', 'CAPSLOCK', 'F1', 'F2', 'F3', 'F4', 'F5',
-    'F6', 'F7', 'F8', 'F9', 'F10', 'NUMLOCK', 'SCROLLLOCK',
-    'KP7', 'KP8', 'KP9', 'KPMINUS', 'KP4', 'KP5', 'KP6', 'KPPLUS', 'KP1',
-    'KP2', 'KP3', 'KP0', 'KPDOT', '(84)', 'ZENKAKUHANKAKU', '102ND',
-    'F11', 'F12', 'RO', 'KATAKANA', 'HIRAGANA', 'HENKAN',
-    'KATAKANAHIRAGANA', 'MUHENKAN', 'KPJPCOMMA', 'KPENTER',
-    'RIGHTCTRL', 'KPSLASH', 'SYSRQ', 'RIGHTALT', 'LINEFEED', 'HOME',
-    'UP', 'PAGEUP', 'LEFT', 'RIGHT', 'END', 'DOWN', 'PAGEDOWN',
-    'INSERT', 'DELETE', 'MACRO', 'MUTE', 'VOLUMEDOWN', 'VOLUMEUP',
-    'POWER', 'KPEQUAL', 'KPPLUSMINUS', 'PAUSE', 'SCALE', 'KPCOMMA',
-    'HANGEUL', 'HANJA', 'YEN', 'LEFTMETA', 'RIGHTMETA', 'COMPOSE',
-    'STOP', 'AGAIN', 'PROPS', 'UNDO', 'FRONT', 'COPY', 'OPEN',
-    'PASTE', 'FIND', 'CUT', 'HELP', 'MENU', 'CALC', 'SETUP', 'SLEEP',
-    'WAKEUP', 'FILE', 'SENDFILE', 'DELETEFILE', 'XFER', 'PROG1',
-    'PROG2', 'WWW', 'MSDOS', 'COFFEE', 'ROTATE_DISPLAY', 'CYCLEWINDOWS',
-    'MAIL', 'BOOKMARKS', 'COMPUTER', 'BACK', 'FORWARD', 'CLOSECD',
-    'EJECTCD', 'EJECTCLOSECD', 'NEXTSONG', 'PLAYPAUSE', 'PREVIOUSSONG',
-    'STOPCD', 'RECORD', 'REWIND', 'PHONE', 'ISO', 'CONFIG', 'HOMEPAGE',
-    'REFRESH', 'EXIT', 'MOVE', 'EDIT', 'SCROLLUP', 'SCROLLDOWN',
-    'KPLEFTPAREN', 'KPRIGHTPAREN', 'NEW', 'REDO', 'F13', 'F14', 'F15',
-    'F16', 'F17', 'F18', 'F19', 'F20', 'F21', 'F22', 'F23', 'F24',
-    '(195)', '(196)', '(197)', '(198)', '(199)', 'PLAYCD', 'PAUSECD',
-    'PROG3', 'PROG4', 'ALL_APPLICATIONS', 'SUSPEND', 'CLOSE', 'PLAY',
-    'FASTFORWARD', 'BASSBOOST', 'PRINT', 'HP', 'CAMERA', 'SOUND',
-    'QUESTION', 'EMAIL', 'CHAT', 'SEARCH', 'CONNECT', 'FINANCE',
-    'SPORT', 'SHOP', 'ALTERASE', 'CANCEL', 'BRIGHTNESSDOWN', 'BRIGHTNESSUP',
-    'MEDIA', 'SWITCHVIDEOMODE', 'KBDILLUMTOGGLE', 'KBDILLUMDOWN',
-    'KBDILLUMUP', 'SEND', 'REPLY', 'FORWARDMAIL', 'SAVE', 'DOCUMENTS',
-    'BATTERY', 'BLUETOOTH', 'WLAN', 'UWB', 'UNKNOWN', 'VIDEO_NEXT',
-    'VIDEO_PREV', 'BRIGHTNESS_CYCLE', 'BRIGHTNESS_AUTO', 'DISPLAY_OFF',
-    'WWAN', 'RFKILL', 'MICMUTE');
+    ('RESERVED', 'ESC', '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'MINUS', 'EQUAL',
+    'BACKSPACE', 'TAB', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', 'LEFTBRACE',
+    'RIGHTBRACE', 'ENTER', 'LEFTCTRL', 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', 'SEMICOLON',
+    'APOSTROPHE', 'GRAVE', 'LEFTSHIFT', 'BACKSLASH', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', 'COMMA',
+    'DOT', 'SLASH', 'RIGHTSHIFT', 'KPASTERISK', 'LEFTALT', 'SPACE', 'CAPSLOCK', 'F1', 'F2',
+    'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'NUMLOCK', 'SCROLLLOCK', 'KP7', 'KP8',
+    'KP9', 'KPMINUS', 'KP4', 'KP5', 'KP6', 'KPPLUS', 'KP1', 'KP2', 'KP3', 'KP0', 'KPDOT',
+    '(84)', 'ZENKAKUHANKAKU', '102ND', 'F11', 'F12', 'RO', 'KATAKANA', 'HIRAGANA', 'HENKAN',
+    'KATAKANAHIRAGANA', 'MUHENKAN', 'KPJPCOMMA', 'KPENTER', 'RIGHTCTRL', 'KPSLASH', 'SYSRQ',
+    'RIGHTALT', 'LINEFEED', 'HOME', 'UP', 'PAGEUP', 'LEFT', 'RIGHT', 'END', 'DOWN', 'PAGEDOWN',
+    'INSERT', 'DELETE', 'MACRO', 'MUTE', 'VOLUMEDOWN', 'VOLUMEUP', 'POWER', 'KPEQUAL',
+    'KPPLUSMINUS', 'PAUSE', 'SCALE', 'KPCOMMA', 'HANGEUL', 'HANJA', 'YEN', 'LEFTMETA',
+    'RIGHTMETA', 'COMPOSE', 'STOP', 'AGAIN', 'PROPS', 'UNDO', 'FRONT', 'COPY', 'OPEN', 'PASTE',
+    'FIND', 'CUT', 'HELP', 'MENU', 'CALC', 'SETUP', 'SLEEP', 'WAKEUP', 'FILE', 'SENDFILE',
+    'DELETEFILE', 'XFER', 'PROG1', 'PROG2', 'WWW', 'MSDOS', 'COFFEE', 'ROTATE_DISPLAY',
+    'CYCLEWINDOWS', 'MAIL', 'BOOKMARKS', 'COMPUTER', 'BACK', 'FORWARD', 'CLOSECD', 'EJECTCD',
+    'EJECTCLOSECD', 'NEXTSONG', 'PLAYPAUSE', 'PREVIOUSSONG', 'STOPCD', 'RECORD', 'REWIND',
+    'PHONE', 'ISO', 'CONFIG', 'HOMEPAGE', 'REFRESH', 'EXIT', 'MOVE', 'EDIT', 'SCROLLUP',
+    'SCROLLDOWN', 'KPLEFTPAREN', 'KPRIGHTPAREN', 'NEW', 'REDO', 'F13', 'F14', 'F15', 'F16',
+    'F17', 'F18', 'F19', 'F20', 'F21', 'F22', 'F23', 'F24', '(195)', '(196)', '(197)', '(198)',
+    '(199)', 'PLAYCD', 'PAUSECD', 'PROG3', 'PROG4', 'ALL_APPLICATIONS', 'SUSPEND', 'CLOSE',
+    'PLAY', 'FASTFORWARD', 'BASSBOOST', 'PRINT', 'HP', 'CAMERA', 'SOUND', 'QUESTION', 'EMAIL',
+    'CHAT', 'SEARCH', 'CONNECT', 'FINANCE', 'SPORT', 'SHOP', 'ALTERASE', 'CANCEL',
+    'BRIGHTNESSDOWN', 'BRIGHTNESSUP', 'MEDIA', 'SWITCHVIDEOMODE', 'KBDILLUMTOGGLE',
+    'KBDILLUMDOWN', 'KBDILLUMUP', 'SEND', 'REPLY', 'FORWARDMAIL', 'SAVE', 'DOCUMENTS', 'BATTERY',
+    'BLUETOOTH', 'WLAN', 'UWB', 'UNKNOWN', 'VIDEO_NEXT', 'VIDEO_PREV', 'BRIGHTNESS_CYCLE',
+    'BRIGHTNESS_AUTO', 'DISPLAY_OFF', 'WWAN', 'RFKILL', 'MICMUTE');
 
 var
   DaemonMode: boolean = True;
   AppEventLog: TEventLog = nil;
   E: Exception;
 
-  Key_RPL: word;
+  Key_RPL: word = 0;
   Keys_LS: array of word = nil;
   StrKeys_LS: string = '';
 
@@ -187,8 +175,7 @@ var
     except
       on E: Exception do
       begin
-        Log(etError, Format('Error creating systemd control file. %s. Are you root?',
-          [E.Message]), False);
+        Log(etError, Format('Error creating systemd control file. %s. Are you root?', [E.Message]), False);
         if Assigned(UnitFile) then
           FreeAndNil(UnitFile);
       end;
@@ -206,8 +193,7 @@ var
         Log(etError, Format('Error removing systemd control file %s. Are you root?',
           [SYSTEMD_UNIT_FILE]), False)
     else
-      Log(etError, Format('Nothing to uninstall. Unit file not found %s.',
-        [SYSTEMD_UNIT_FILE]), False);
+      Log(etError, Format('Nothing to uninstall. Unit file not found %s.', [SYSTEMD_UNIT_FILE]), False);
   end;
 
   function KeyboardDetectThread(ptr: Pointer): ptrint;
@@ -228,8 +214,8 @@ var
         ioRes := fpRead(KeyboardFD, KeyIE, SizeOf(KeyIE));
         if (ioRes = SizeOf(KeyIE)) then
         begin
-          if ((KeyIE.ie_type = 1) and (KeyIE.code = KEY_ENTER) and
-            (KeyIE.Value in [0, 1, 2])) then
+          if ((KeyIE.ie_type = 1) and ((KeyIE.code = KEY_ENTER) or (KeyIE.code = KEY_KPENTER)) and
+            (KeyIE.value in [0, 1, 2])) then
           begin
             KeyboardDetectInfo(ptr^).active := True;
             break;
@@ -270,10 +256,8 @@ var
     begin
       try
         ConfigIniFile := TIniFile.Create(CONFIG_FILE, [ifoStripQuotes]);
-        MousePath := ConfigIniFile.ReadString('Easy Switcher', 'mouse',
-          '/dev/input/mice');
-        ReverseMode := StrToBool(ConfigIniFile.ReadString('Easy Switcher',
-          'reverse-mode', 'False'));
+        MousePath := ConfigIniFile.ReadString('Easy Switcher', 'mouse', '/dev/input/mice');
+        ReverseMode := StrToBool(ConfigIniFile.ReadString('Easy Switcher', 'reverse-mode', 'False'));
         Delay := ConfigIniFile.ReadInteger('Easy Switcher', 'delay', 10);
         Log(etInfo, 'Done.', True);
         if Assigned(ConfigIniFile) then
@@ -281,8 +265,7 @@ var
       except
         on E: Exception do
         begin
-          Log(etInfo, Format(
-            'Error reading config file, Easy Switcher will create new one. %s',
+          Log(etInfo, Format('Error reading config file, Easy Switcher will create new one. %s',
             [E.Message]), False);
           if Assigned(ConfigIniFile) then
             FreeAndNil(ConfigIniFile);
@@ -292,13 +275,17 @@ var
       Log(etInfo, '', True);
       Log(etInfo, 'Easy Switcher will try to detect your keyboard automatically.', True);
       sleep(100);
-      if FindFirst(INPUT_DEVICES_DIR + 'event*', faSysFile, SRec) = 0 then
+      if FindFirst(INPUT_DEVICES_DIR + 'event*', faAnyFile, SRec) = 0 then
       begin
         repeat
           with SRec do
           begin
+            if (Attr and faDirectory) <> 0 then
+              continue;
+
             if (fpOpen((INPUT_DEVICES_DIR + Name), O_RDONLY or O_NONBLOCK) = -1) then
               continue;
+
             SetLength(KeyboardList, Length(KeyboardList) + 1);
             KeyboardList[i].id := i;
             KeyboardList[i].Active := False;
@@ -311,11 +298,12 @@ var
 
       if Length(KeyboardList) > 0 then
       begin
-        Log(etInfo, 'Please press ENTER...', True);
         for i := 0 to Length(KeyboardList) - 1 do
         begin
           BeginThread(@KeyboardDetectThread, @(KeyboardList[i]));
         end;
+        Log(etInfo, 'Please press ENTER...', True);
+        ReadLn();
 
         i := 0;
         k := 0;
@@ -341,9 +329,7 @@ var
           KeyboardFD := fpOpen(KeyboardPath, O_RDONLY or O_SYNC);
           if KeyboardFD <> -1 then
           begin
-            Log(etInfo,
-              'Press the key or combination of keys that changes layout in your system.',
-              True);
+            Log(etInfo, 'Press the key or combination of keys that changes layout in your system.', True);
             Log(etInfo, 'Waiting for your input...', True);
             i := 0;
             while i < 6000 do
@@ -352,13 +338,13 @@ var
               ioRes := fpRead(KeyboardFD, KeyIE, SizeOf(KeyIE));
               if (ioRes = SizeOf(KeyIE)) then
               begin
-                if ((KeyIE.ie_type = EV_KEY) and (KeyIE.Value in [0, 1])) then
+                if ((KeyIE.ie_type = EV_KEY) and (KeyIE.value in [0, 1])) then
                 begin
                   SetLength(Keys_LS, Length(Keys_LS) + 1);
                   Keys_LS[Length(Keys_LS) - 1] := KeyIE.code;
                   if Length(Keys_LS) = 2 then
                   begin
-                    if KeyIE.Value = 0 then
+                    if KeyIE.value = 0 then
                     begin
                       StrKeys_LS := IntToStr(Keys_LS[0]);
                     end
@@ -397,9 +383,7 @@ var
             fpClose(KeyboardFD);
             KeyboardFD := fpOpen(KeyboardPath, O_RDONLY or O_SYNC);
 
-            Log(etInfo,
-              'Press the key you will use to correct the text you have entered.',
-              True);
+            Log(etInfo, 'Press the key you will use to correct the text you have entered.', True);
             Log(etInfo, 'Waiting for your input...', True);
             i := 0;
             while i < 6000 do
@@ -408,7 +392,7 @@ var
               ioRes := fpRead(KeyboardFD, KeyIE, SizeOf(KeyIE));
               if (ioRes = SizeOf(KeyIE)) then
               begin
-                if ((KeyIE.ie_type = 1) and (KeyIE.Value = 1)) then
+                if ((KeyIE.ie_type = 1) and (KeyIE.value = 1)) then
                 begin
                   Key_RPL := KeyIE.code;
                   break;
@@ -418,7 +402,7 @@ var
               Inc(i);
             end;
 
-            if Key_RPL <> -1 then
+            if Key_RPL <> 0 then
             begin
               Log(etInfo, Format('Key %s captured', [KeyName[Key_RPL]]), True);
               Log(etInfo, '', True);
@@ -432,9 +416,6 @@ var
             FpClose(KeyboardFD);
             sleep(500);
 
-            //flush terminal buffer
-            ioRes := fpIOCtl(StdInputHandle, TCFLSH, pointer(Ord(TCIFLUSH)));
-
             Log(etInfo, 'Writing configuration file...', True);
             try
               Config := TStringList.Create;
@@ -442,16 +423,14 @@ var
               Config.Add('# This is Easy Switcher config file.');
               Config.Add('');
               Config.Add('# Keyboard device path.');
-              Config.Add(
-                '# Run ''~$ hwinfo --keyboard --short'' to get the list of your keyboard devices.');
+              Config.Add('# Run ''~$ hwinfo --keyboard --short'' to get the list of your keyboard devices.');
               Config.Add('# keyboard="/dev/input/event2"');
               Config.Add('');
               Config.Add('keyboard="' + KeyboardPath + '"');
               Config.Add('');
               Config.Add('');
               Config.Add('# Mouse device path.');
-              Config.Add(
-                '# Run ''~$ hwinfo --mouse --short'' to get the list of your mouse devices.');
+              Config.Add('# Run ''~$ hwinfo --mouse --short'' to get the list of your mouse devices.');
               Config.Add('# mouse="/dev/input/mice"');
               Config.Add('');
               Config.Add('mouse="' + MousePath + '"');
@@ -476,12 +455,10 @@ var
               Config.Add('');
               Config.Add('');
               Config.Add('# If reverse-mode is false, pressing <replace-key> corrects');
-              Config.Add(
-                '# only last word you have entered. Pressing Shift + <replace-key> corrects');
+              Config.Add('# only last word you have entered. Pressing Shift + <replace-key> corrects');
               Config.Add('# the whole phrase.');
               Config.Add('# If reverse-mode is true, pressing <replace-key> corrects');
-              Config.Add(
-                '# the whole phrase you have entered, and Shift + <replace-key> corrects');
+              Config.Add('# the whole phrase you have entered, and Shift + <replace-key> corrects');
               Config.Add('# only the last word.');
               Config.Add('# Default reverse-mode value is false');
               Config.Add('# reverse-mode=false');
@@ -489,12 +466,10 @@ var
               Config.Add('reverse-mode=' + BoolToStr(ReverseMode, True) + '');
               Config.Add('');
               Config.Add('');
-              Config.Add(
-                '# Easy Switcher uses a delay to wait for your system to process the actions.');
+              Config.Add('# Easy Switcher uses a delay to wait for your system to process the actions.');
               Config.Add('# The smaller delay is, the faster Easy Switcher works.');
               Config.Add('# However, your desktop environment may not be able to handle');
-              Config.Add(
-                '# Easy Switcher output in a timely manner and you will get errors.');
+              Config.Add('# Easy Switcher output in a timely manner and you will get errors.');
               Config.Add('# Try to increase the delay if you get messy output.');
               Config.Add('# Default delay value is 10');
               Config.Add('# delay=10');
@@ -502,15 +477,13 @@ var
               Config.Add('delay=' + IntToStr(Delay));
               Config.SaveToFile(CONFIG_FILE);
               Log(etInfo, 'Keyboard configuration successfully saved.', False);
-              Log(etInfo, Format('See %s to edit additional parameters.',
-                [CONFIG_FILE]), False);
+              Log(etInfo, Format('See %s to edit additional parameters.', [CONFIG_FILE]), False);
               if Assigned(Config) then
                 FreeAndNil(Config);
             except
               on E: Exception do
               begin
-                Log(etError, Format('Error writing configuration file %s %s',
-                  [CONFIG_FILE, StrError(errno)]), False);
+                Log(etError, Format('Error writing configuration file %s %s', [CONFIG_FILE, StrError(errno)]), False);
                 if Assigned(Config) then
                   FreeAndNil(Config);
               end;
@@ -536,8 +509,7 @@ var
     end
     else
     begin
-      Log(etError, Format('Cannot create directory %s',
-        [ExtractFilePath(CONFIG_FILE)]), False);
+      Log(etError, Format('Cannot create directory %s', [ExtractFilePath(CONFIG_FILE)]), False);
       Halt(1);
     end;
   end;
@@ -561,7 +533,7 @@ var
   begin
     while not StopAndExit do
     begin
-      ioRes := fpRead(longint(PMouseFD), MouseData, SizeOf(MouseData));
+      ioRes := fpRead(PtrInt(PMouseFD^), MouseData, SizeOf(MouseData));
       if NeedTrackMouse then
       begin
         if ioRes = SizeOf(MouseData) then
@@ -608,21 +580,20 @@ var
       if Length(KeyBuf) < 2 then Exit(KeepBuffer);
 
       if Length(KeyBuf) < 4 then
-        if (KeyBuf[Last].code = Key_RPL) and (KeyBuf[Last].Value = 0) and
-          (KeyBuf[Last - 1].code = Key_RPL) and (KeyBuf[Last - 1].Value = 1) then
+        if (KeyBuf[Last].code = Key_RPL) and (KeyBuf[Last].value = 0) and
+          (KeyBuf[Last - 1].code = Key_RPL) and (KeyBuf[Last - 1].value = 1) then
           Exit(ReplaceWord)
         else
           Exit(KeepBuffer);
 
-      if (KeyBuf[Last].code = Key_RPL) and (KeyBuf[Last].Value = 0) and
-        (KeyBuf[Last - 1].code in Shifts) and (KeyBuf[Last - 1].Value = 0) and
-        (KeyBuf[Last - 2].code = Key_RPL) and (KeyBuf[Last - 2].Value = 1) and
-        (KeyBuf[Last - 3].code in Shifts) and (KeyBuf[Last - 3].Value = 1) then
+      if (KeyBuf[Last].code = Key_RPL) and (KeyBuf[Last].value = 0) and (KeyBuf[Last - 1].code in Shifts) and
+        (KeyBuf[Last - 1].value = 0) and (KeyBuf[Last - 2].code = Key_RPL) and
+        (KeyBuf[Last - 2].value = 1) and (KeyBuf[Last - 3].code in Shifts) and (KeyBuf[Last - 3].value = 1) then
         Exit(ReplaceAll)  //shiftd rpld shiftu rplu
       else
-      if (KeyBuf[Last].code = Key_RPL) and (KeyBuf[Last].Value = 0) and
-        (KeyBuf[Last - 1].code = Key_RPL) and (KeyBuf[Last - 1].Value = 1) then
-        if (KeyBuf[Last - 2].code in Shifts) and (KeyBuf[Last - 2].Value = 1) then
+      if (KeyBuf[Last].code = Key_RPL) and (KeyBuf[Last].value = 0) and (KeyBuf[Last - 1].code = Key_RPL) and
+        (KeyBuf[Last - 1].value = 1) then
+        if (KeyBuf[Last - 2].code in Shifts) and (KeyBuf[Last - 2].value = 1) then
           Exit(ReplaceAll)  //shiftd rpld rplu
         else
           Exit(ReplaceWord);  //rpld rplu
@@ -636,8 +607,7 @@ var
     begin
       Result := '';
       for i := 0 to Length(KeyBuf) - 1 do
-        Result := Result + Format('%s %s; ', [KeyName[KeyBuf[i].code],
-          KeyAction[KeyBuf[i].Value]]);
+        Result := Result + Format('%s %s; ', [KeyName[KeyBuf[i].code], KeyAction[KeyBuf[i].value]]);
     end;
 
     procedure PrepareBuffer();
@@ -658,14 +628,13 @@ var
 
       //get rid of replace keys
       Last := Length(iBuf) - 1;
-      if (iBuf[Last].code = Key_RPL) and (iBuf[Last].Value = 0) and
-        (iBuf[Last - 1].code in Shifts) and (iBuf[Last - 1].Value = 0) and
-        (iBuf[Last - 2].code = Key_RPL) and (iBuf[Last - 2].Value = 1) and
-        (iBuf[Last - 3].code in Shifts) and (iBuf[Last - 3].Value = 1) then
+      if (iBuf[Last].code = Key_RPL) and (iBuf[Last].value = 0) and (iBuf[Last - 1].code in Shifts) and
+        (iBuf[Last - 1].value = 0) and (iBuf[Last - 2].code = Key_RPL) and (iBuf[Last - 2].value = 1) and
+        (iBuf[Last - 3].code in Shifts) and (iBuf[Last - 3].value = 1) then
         Last := Last - 4
-      else if (iBuf[Last].code = Key_RPL) and (iBuf[Last].Value = 0) and
-        (iBuf[Last - 1].code = Key_RPL) and (iBuf[Last - 1].Value = 1) then
-        if (iBuf[Last - 2].code in Shifts) and (iBuf[Last - 2].Value = 1) then
+      else if (iBuf[Last].code = Key_RPL) and (iBuf[Last].value = 0) and (iBuf[Last - 1].code = Key_RPL) and
+        (iBuf[Last - 1].value = 1) then
+        if (iBuf[Last - 2].code in Shifts) and (iBuf[Last - 2].value = 1) then
           Last := Last - 3
         else
           Last := Last - 2;
@@ -687,7 +656,7 @@ var
       k := 0;
       for i := 0 to Length(iBuf) - 1 do
       begin
-        if (iBuf[i].code = KEY_ENTER) and (iBuf[i].Value = 0) and
+        if ((iBuf[i].code = KEY_ENTER) or (iBuf[i].code = KEY_KPENTER)) and (iBuf[i].value = 0) and
           (i <> Length(iBuf) - 1) then
         begin
           k := 0;
@@ -798,8 +767,7 @@ var
       begin
         for n := 0 to Length(KeyBuf) - 1 do
         begin
-          if (KeyBuf[n].Value = 0) and (KeyBuf[n].code = KEY_SPACE) and
-            (n <> Length(KeyBuf) - 1) then
+          if (KeyBuf[n].value = 0) and (KeyBuf[n].code = KEY_SPACE) and (n <> Length(KeyBuf) - 1) then
           begin
             s := n + 1; //set the conversion limit by SPACE UP
           end;
@@ -807,13 +775,13 @@ var
       end;
 
       for n := s to Length(KeyBuf) - 1 do
-        if (KeyBuf[n].Value in [1, 2]) and (not (KeyBuf[n].code in Shifts)) then
+        if (KeyBuf[n].value in [1, 2]) and (not (KeyBuf[n].code in Shifts)) then
         begin
           k := Length(IEBuf);           //BS down
           SetLength(IEBuf, k + 1);
           IEBuf[k].ie_type := EV_KEY;
           IEBuf[k].code := KEY_BACKSPACE;
-          IEBuf[k].Value := 1;
+          IEBuf[k].value := 1;
           IEBuf[k].time.tv_sec := IETime.tv_sec;
           IEBuf[k].time.tv_usec := IETime.tv_usec;
           IETime.tv_usec := IETime.tv_usec + 200;
@@ -822,7 +790,7 @@ var
           SetLength(IEBuf, k + 1);
           IEBuf[k].ie_type := EV_KEY;
           IEBuf[k].code := KEY_BACKSPACE;
-          IEBuf[k].Value := 0;
+          IEBuf[k].value := 0;
           IEBuf[k].time.tv_sec := IETime.tv_sec;
           IEBuf[k].time.tv_usec := IETime.tv_usec;
           IETime.tv_usec := IETime.tv_usec + 200;
@@ -832,7 +800,7 @@ var
       SetLength(IEBuf, k + 1);
       IEBuf[k].ie_type := EV_KEY;
       IEBuf[k].code := Keys_LS[0];
-      IEBuf[k].Value := 1;
+      IEBuf[k].value := 1;
       IEBuf[k].time.tv_sec := IETime.tv_sec;
       IEBuf[k].time.tv_usec := IETime.tv_usec;
       IETime.tv_usec := IETime.tv_usec + 200;
@@ -843,7 +811,7 @@ var
         SetLength(IEBuf, k + 1);
         IEBuf[k].ie_type := EV_KEY;
         IEBuf[k].code := Keys_LS[1];
-        IEBuf[k].Value := 1;
+        IEBuf[k].value := 1;
         IEBuf[k].time.tv_sec := IETime.tv_sec;
         IEBuf[k].time.tv_usec := IETime.tv_usec;
         IETime.tv_usec := IETime.tv_usec + 200;
@@ -852,7 +820,7 @@ var
         SetLength(IEBuf, k + 1);
         IEBuf[k].ie_type := EV_KEY;
         IEBuf[k].code := Keys_LS[1];
-        IEBuf[k].Value := 0;
+        IEBuf[k].value := 0;
         IEBuf[k].time.tv_sec := IETime.tv_sec;
         IEBuf[k].time.tv_usec := IETime.tv_usec;
         IETime.tv_usec := IETime.tv_usec + 200;
@@ -862,7 +830,7 @@ var
       SetLength(IEBuf, k + 1);
       IEBuf[k].ie_type := EV_KEY;
       IEBuf[k].code := Keys_LS[0];
-      IEBuf[k].Value := 0;
+      IEBuf[k].value := 0;
       IEBuf[k].time.tv_sec := IETime.tv_sec;
       IEBuf[k].time.tv_usec := IETime.tv_usec;
       IETime.tv_usec := IETime.tv_usec + 200;
@@ -875,7 +843,7 @@ var
         SetLength(IEBuf, k + 1);
         IEBuf[k].ie_type := EV_KEY;
         IEBuf[k].code := KeyBuf[n].code;
-        IEBuf[k].Value := KeyBuf[n].Value;
+        IEBuf[k].value := KeyBuf[n].value;
         IEBuf[k].time.tv_sec := IETime.tv_sec;
         IEBuf[k].time.tv_usec := IETime.tv_usec;
         IETime.tv_usec := IETime.tv_usec + 200;
@@ -887,24 +855,21 @@ var
         EmitBuf[1] := IEBuf[n];
         EmitBuf[2].ie_type := EV_SYN;
         EmitBuf[2].code := SYN_REPORT;
-        EmitBuf[2].Value := 0;
+        EmitBuf[2].value := 0;
         EmitBuf[2].time.tv_sec := IEBuf[n].time.tv_sec;
         EmitBuf[2].time.tv_usec := IEBuf[n].time.tv_usec + 100;
 
         fpWrite(vKeyboardFD, EmitBuf[1], sizeof(EmitBuf[1]) * 2);
-        Log(etInfo, Format('output %s %s', [KeyName[EmitBuf[1].code],
-          KeyAction[EmitBuf[1].Value]]), True);
+        Log(etInfo, Format('output %s %s', [KeyName[EmitBuf[1].code], KeyAction[EmitBuf[1].value]]), True);
         Sleep(Delay);
       end;
     end;
 
   begin
     if DaemonMode then
-      Log(etInfo, Format('Starting Easy Switcher v%s...',
-        [EASY_SWITCHER_VERSION]), False)
+      Log(etInfo, Format('Starting Easy Switcher v%s...', [EASY_SWITCHER_VERSION]), False)
     else
-      Log(etInfo, Format('Starting Easy Switcher v%s in debug mode...',
-        [EASY_SWITCHER_VERSION]), False);
+      Log(etInfo, Format('Starting Easy Switcher v%s in debug mode...', [EASY_SWITCHER_VERSION]), False);
 
     //Init variables
     NewAct := Default(SigactionRec);
@@ -916,7 +881,7 @@ var
     vKeyboardSetup.id.bustype := BUS_USB;
     vKeyboardSetup.id.vendor := $0777;
     vKeyboardSetup.id.product := $0777;
-    vKeyboardSetup.Name := 'Easy Switcher virtual input device';
+    vKeyboardSetup.name := 'Easy Switcher virtual input device';
 
     //Set signal processing handlers
     Log(etInfo, 'Setting up signal handlers...', True);
@@ -941,18 +906,14 @@ var
         ConfigIniFile := TIniFile.Create(CONFIG_FILE, [ifoStripQuotes]);
         KeyboardPath := ConfigIniFile.ReadString('Easy Switcher', 'keyboard', '~');
         MousePath := ConfigIniFile.ReadString('Easy Switcher', 'mouse', '~');
-        StrKeys_LS := ConfigIniFile.ReadString('Easy Switcher',
-          'layout-switch-key', '-1');
-        Key_RPL := StrToUInt(ConfigIniFile.ReadString('Easy Switcher',
-          'replace-key', '-1'));
-        ReverseMode := StrToBool(ConfigIniFile.ReadString('Easy Switcher',
-          'reverse-mode', 'False'));
+        StrKeys_LS := ConfigIniFile.ReadString('Easy Switcher', 'layout-switch-key', '-1');
+        Key_RPL := StrToInt(ConfigIniFile.ReadString('Easy Switcher', 'replace-key', '0'));
+        ReverseMode := StrToBool(ConfigIniFile.ReadString('Easy Switcher', 'reverse-mode', 'False'));
         Delay := StrToInt(ConfigIniFile.ReadString('Easy Switcher', 'delay', '10'));
         SetLength(Keys_LS, SScanf(StrKeys_LS, '%d+%d', [@Keys_LS[0], @Keys_LS[1]]));
         if Assigned(ConfigIniFile) then
           FreeAndNil(ConfigIniFile);
-        if ((KeyboardPath = '~') or (MousePath = '~') or (Length(Keys_LS) = 0) or
-          (KEY_RPL = -1)) then
+        if ((KeyboardPath = '~') or (MousePath = '~') or (Length(Keys_LS) = 0) or (KEY_RPL = 0)) then
         begin
           Log(etError, 'Error parsing config file.', False);
           Halt(1);
@@ -969,9 +930,7 @@ var
     end
     else
     begin
-      Log(etError, Format(
-        'Missing config file %s, run ''easy-switcher -c'' to configure.',
-        [CONFIG_FILE]), False);
+      Log(etError, Format('Missing config file %s, run ''easy-switcher -c'' to configure.', [CONFIG_FILE]), False);
       Halt(1);
     end;
     Log(etInfo, 'Done.', True);
@@ -988,7 +947,7 @@ var
 
     //install virtual keyboard
     Log(etInfo, 'Installing virtual keyboard...', True);
-    vKeyboardFD := fpOpen(UINPUT_FILE, O_WRONLY or O_SYNC);   //   or O_NONBLOCK
+    vKeyboardFD := fpOpen(UINPUT_FILE, O_WRONLY or O_SYNC);   // or O_NONBLOCK
     if vKeyboardFD = -1 then
     begin
       Log(etError, Format('Cannot open %s %s', [UINPUT_FILE, StrError(errno)]), False);
@@ -997,13 +956,12 @@ var
     ioRes += fpIOCtl(vKeyboardFD, UI_SET_EVBIT, Pointer(EV_SYN));
     ioRes += fpIOCtl(vKeyboardFD, UI_SET_EVBIT, Pointer(EV_KEY));
     for i := 0 to 248 do
-      iores += fpIOCtl(vKeyboardFD, UI_SET_KEYBIT, Pointer(i));
+      ioRes += fpIOCtl(vKeyboardFD, UI_SET_KEYBIT, Pointer(i));
     ioRes += fpIOCtl(vKeyboardFD, UI_DEV_SETUP, @vKeyboardSetup);
     ioRes += fpIOCtl(vKeyboardFD, UI_DEV_CREATE, nil);
     if ioRes <> 0 then
     begin
-      Log(etError, Format('Cannot install virtual keyboard. %s',
-        [StrError(errno)]), False);
+      Log(etError, Format('Cannot install virtual keyboard. %s', [StrError(errno)]), False);
       Halt(1);
     end;
     ioRes := -1;
@@ -1018,7 +976,7 @@ var
       Log(etError, Format('Cannot open %s %s', [MousePath, StrError(errno)]), False);
       Halt(1);
     end;
-    BeginThread(@TrackMouseThread, Pointer(MouseFD));
+    BeginThread(@TrackMouseThread, @MouseFD);
     Log(etInfo, 'Done.', True);
 
     //started successfully, now working
@@ -1026,19 +984,7 @@ var
     while not StopAndExit do
     begin
       ioRes := fpRead(KeyboardFD, KeyIE, SizeOf(KeyIE));
-      if (ioRes <> SizeOf(KeyIE)) then
-      begin
-        if (errno = EINTR) then
-          Continue
-        else
-        begin
-          errno := EIO;
-          Log(etError, Format('Abnormal data read from %s %s',
-            [KeyboardPath, StrError(errno)]), False);
-          Continue;
-        end;
-      end
-      else
+      if (ioRes = SizeOf(KeyIE)) then
       begin
         if NeedClearKeyBuf then
         begin
@@ -1046,41 +992,38 @@ var
           NeedClearKeyBuf := False;
           Log(etInfo, 'buffer cleared', True);
         end;
-        if ((KeyIE.ie_type = EV_KEY) and (KeyIE.Value in [0, 1])) then //, 2
+        if ((KeyIE.ie_type = EV_KEY) and (KeyIE.value in [0, 1])) then //, 2
         begin
-          Log(etInfo, Format('input %s %s', [KeyName[KeyIE.code],
-            KeyAction[KeyIE.Value]]), True);
+          Log(etInfo, Format('input %s %s', [KeyName[KeyIE.code], KeyAction[KeyIE.value]]), True);
           sleep(50);
-          if ((KeyIE.code in Letters) or (KeyIE.code in Shifts) or
-            (KeyIE.code = KEY_RPL)) then
+          if ((KeyIE.code in Letters) or (KeyIE.code in Shifts) or (KeyIE.code = KEY_RPL)) then
           begin
             i := Length(KeyBuf);
             SetLength(KeyBuf, i + 1);
             KeyBuf[i].ie_type := KeyIE.ie_type;
             KeyBuf[i].code := KeyIE.code;
-            KeyBuf[i].Value := KeyIE.Value;
+            KeyBuf[i].value := KeyIE.value;
             KeyBuf[i].time.tv_sec := 0;
             KeyBuf[i].time.tv_usec := 0;
-
             NeedTrackMouse := True;
           end;
-          if (KeyIE.code in BufKillers) and (KeyIE.Value = 0) then
+          if (KeyIE.code in BufKillers) and (KeyIE.value = 0) then
           begin
             SetLength(KeyBuf, 0);
             NeedClearKeyBuf := False;
             Log(etInfo, 'buffer cleared', True);
           end;
           if Length(KeyBuf) > 0 then
-            if ((KeyIE.code = KEY_RPL) and (KeyIE.Value = 0)) or
-              ((KeyIE.code in Shifts) and (KeyIE.Value = 0)) then
+            if ((KeyIE.code = KEY_RPL) and (KeyIE.value = 0)) or
+              ((KeyIE.code in Shifts) and (KeyIE.value = 0)) then
             begin
               BufferAction := GetBufferAction;
               if BufferAction <> KeepBuffer then
               begin
                 Log(etInfo, 'prepare buffer', True);
-                Log(etInfo, ' raw: ' + GetBufferStr, True);
+                Log(etInfo, '  raw: ' + GetBufferStr, True);
                 PrepareBuffer;
-                Log(etInfo, ' prepared: ' + GetBufferStr, True);
+                Log(etInfo, '  prepared: ' + GetBufferStr, True);
                 if (BufferAction = ReplaceAll) xor ReverseMode then
                 begin
                   Log(etInfo, 'convert all', True);
@@ -1096,7 +1039,9 @@ var
               end;
             end;
         end;
-      end;
+      end
+      else
+        Sleep(10);
     end;
 
     if KeyboardFD <> -1 then fpClose(KeyboardFD);
@@ -1158,8 +1103,7 @@ var
   procedure RunHelp();
   begin
     DaemonMode := False;
-    Log(etInfo, Format('Easy Switcher - keyboard layout switcher v%s',
-      [EASY_SWITCHER_VERSION]), True);
+    Log(etInfo, Format('Easy Switcher - keyboard layout switcher v%s', [EASY_SWITCHER_VERSION]), True);
     Log(etInfo, '', True);
     Log(etInfo, 'Usage: easy-switcher [option]', True);
     Log(etInfo, '', True);
@@ -1169,8 +1113,7 @@ var
     Log(etInfo, '   -c,   --configure   configure Easy Switcher', True);
     Log(etInfo, '   -r,   --run         run', True);
     Log(etInfo, '   -d,   --debug       run in a debug mode', True);
-    Log(etInfo, '   -o,   --old-style   run as an "old-style" (not systemd) daemon',
-      True);
+    Log(etInfo, '   -o,   --old-style   run as an "old-style" (not systemd) daemon', True);
     Log(etInfo, '   -h,   --help        show this help', True);
   end;
 
