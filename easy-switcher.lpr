@@ -12,7 +12,8 @@ uses
   Classes,
   IniFiles,
   EventLog,
-  Errors;
+  Errors,
+  Process;
 
 type
   // input.h struct input_event
@@ -44,7 +45,7 @@ type
   TKeyboardList = array of KeyboardDetectInfo;
   TKeyBuf = array of input_event;
   TEmitBuf = array [1..2] of input_event;
-  TBufferAction = (KeepBuffer, ReplaceAll, ReplaceWord);
+  TBufferAction = (KeepBuffer, ReplaceAll, ReplaceWord, ConvertSelection);
 
 const
   EASY_SWITCHER_VERSION = '0.4';
@@ -118,6 +119,8 @@ var
   E: Exception;
 
   Key_RPL: word = 0;
+  Keys_SEL: array of word = nil; // Changed to array for combination support
+  StrKeys_SEL: string = ''; // String representation of convert-selection-key
   Keys_LS: array of word = nil;
   StrKeys_LS: string = '';
 
@@ -129,7 +132,7 @@ var
 
   StopAndExit: boolean = False;
 
-  procedure Log(EventType: TEventType; aMessage: string; StdOutputOnly: boolean);
+  procedure Log(EventType: powod; aMessage: string; StdOutputOnly: boolean);
   begin
     if DaemonMode then
     begin
@@ -413,6 +416,45 @@ var
               Halt(1);
             end;
 
+            sleep(500);
+
+            Log(etInfo, 'Press the combination of keys (Ctrl+Shift+Pause) to convert selected text.', True);
+            Log(etInfo, 'Waiting for your input...', True);
+            i := 0;
+            SetLength(Keys_SEL, 0);
+            while i < 6000 do
+            begin
+              ioRes := 0;
+              ioRes := fpRead(KeyboardFD, KeyIE, SizeOf(KeyIE));
+              if (ioRes = SizeOf(KeyIE)) then
+              begin
+                if ((KeyIE.ie_type = EV_KEY) and (KeyIE.value in [0, 1])) then
+                begin
+                  SetLength(Keys_SEL, Length(Keys_SEL) + 1);
+                  Keys_SEL[Length(Keys_SEL) - 1] := KeyIE.code;
+                  if Length(Keys_SEL) = 3 then
+                  begin
+                    StrKeys_SEL := Format('%d+%d+%d', [Keys_SEL[0], Keys_SEL[1], Keys_SEL[2]]);
+                    break;
+                  end;
+                end;
+              end;
+              sleep(10);
+              Inc(i);
+            end;
+
+            if Length(Keys_SEL) = 3 then
+            begin
+              Log(etInfo, Format('Key combination %s+%s+%s captured for selected text conversion',
+                [KeyName[Keys_SEL[0]], KeyName[Keys_SEL[1]], KeyName[Keys_SEL[2]]]), True);
+              Log(etInfo, '', True);
+            end
+            else
+            begin
+              Log(etError, 'Error reading the keyboard for selection key combination. Expected 3 keys.', False);
+              Halt(1);
+            end;
+
             FpClose(KeyboardFD);
             sleep(500);
 
@@ -452,6 +494,14 @@ var
               Config.Add('# replace-key=119');
               Config.Add('');
               Config.Add('replace-key=' + IntToStr(Key_RPL));
+              Config.Add('');
+              Config.Add('');
+              Config.Add('# Scancode of the key combination to convert selected text.');
+              Config.Add('# Example: Ctrl+Shift+Pause = 29+42+119');
+              Config.Add('# Run ''~$ sudo showkey'' to find out your key scancodes.');
+              Config.Add('# convert-selection-key=29+42+119');
+              Config.Add('');
+              Config.Add('convert-selection-key=' + StrKeys_SEL);
               Config.Add('');
               Config.Add('');
               Config.Add('# If reverse-mode is false, pressing <replace-key> corrects');
@@ -585,6 +635,21 @@ var
           Exit(ReplaceWord)
         else
           Exit(KeepBuffer);
+
+      // Check for Ctrl+Shift+Pause combination
+      if Length(Keys_SEL) = 3 then
+      begin
+        if Length(KeyBuf) >= 6 then
+        begin
+          if (KeyBuf[Last].code = Keys_SEL[2]) and (KeyBuf[Last].value = 0) and // Pause up
+             (KeyBuf[Last - 1].code = Keys_SEL[2]) and (KeyBuf[Last - 1].value = 1) and // Pause down
+             (KeyBuf[Last - 2].code = Keys_SEL[1]) and (KeyBuf[Last - 2].value = 0) and // Shift up
+             (KeyBuf[Last - 3].code = Keys_SEL[0]) and (KeyBuf[Last - 3].value = 0) and // Ctrl up
+             (KeyBuf[Last - 4].code = Keys_SEL[1]) and (KeyBuf[Last - 4].value = 1) and // Shift down
+             (KeyBuf[Last - 5].code = Keys_SEL[0]) and (KeyBuf[Last - 5].value = 1) then // Ctrl down
+            Exit(ConvertSelection);
+        end;
+      end;
 
       if (KeyBuf[Last].code = Key_RPL) and (KeyBuf[Last].value = 0) and (KeyBuf[Last - 1].code in Shifts) and
         (KeyBuf[Last - 1].value = 0) and (KeyBuf[Last - 2].code = Key_RPL) and
@@ -865,6 +930,149 @@ var
       end;
     end;
 
+    procedure ConvertSelectedText();
+    const
+      RU_TO_EN: array[0..33] of string = (
+        'й=q', 'ц=w', 'у=e', 'к=r', 'е=t', 'н=y', 'г=u', 'ш=i', 'щ=o', 'з=p',
+        'х=[', 'ъ=]', 'ф=a', 'ы=s', 'в=d', 'а=f', 'п=g', 'р=h', 'о=j', 'л=k',
+        'д=l', 'ж=;', 'э=''', 'я=z', 'ч=x', 'с=c', 'м=v', 'и=b', 'т=n', 'ь=m',
+        'б=,', 'ю=.', 'ё=`', '.=/'
+      );
+      EN_TO_RU: array[0..33] of string = (
+        'q=й', 'w=ц', 'e=у', 'r=к', 't=е', 'y=н', 'u=г', 'i=ш', 'o=щ', 'p=з',
+        '[=х', ']=ъ', 'a=ф', 's=ы', 'd=в', 'f=а', 'g=п', 'h=р', 'j=о', 'k=л',
+        'l=д', ';=ж', '''=э', 'z=я', 'x=ч', 'c=с', 'v=м', 'b=и', 'n=т', 'm=ь',
+        ',=б', '.=ю', '`=ё', '/=.'
+      );
+    var
+      Text, ConvertedText: string;
+      Process: TProcess;
+      Output: TStringList;
+      EmitBuf: TEmitBuf;
+      IETime: timeval;
+      i: integer;
+      c: char;
+    begin
+      Text := '';
+      ConvertedText := '';
+      Process := TProcess.Create(nil);
+      Output := TStringList.Create;
+      EmitBuf := Default(TEmitBuf);
+      IETime := Default(timeval);
+      clock_gettime(0, @IETime);
+      IETime.tv_usec := 0;
+
+      try
+        // Copy selected text to clipboard
+        Process.Executable := 'xclip';
+        Process.Parameters.Add('-selection');
+        Process.Parameters.Add('primary');
+        Process.Options := [poWaitOnExit, poUsePipes];
+        Process.Execute;
+        Process.Parameters.Clear;
+
+        // Get selected text from clipboard
+        Process.Executable := 'xclip';
+        Process.Parameters.Add('-selection');
+        Process.Parameters.Add('primary');
+        Process.Parameters.Add('-o');
+        Process.Options := [poWaitOnExit, poUsePipes];
+        Process.Execute;
+        Output.LoadFromStream(Process.Output);
+        if Output.Count > 0 then
+          Text := Output.Text;
+        Process.Parameters.Clear;
+
+        // Convert text (RU to EN or EN to RU)
+        if Length(Text) > 0 then
+        begin
+          ConvertedText := Text;
+          // Simple heuristic: if text contains Cyrillic, convert to Latin; else to Cyrillic
+          if Pos('й', Text) > 0 or Pos('ц', Text) > 0 or Pos('у', Text) > 0 then
+          begin
+            for i := 0 to High(RU_TO_EN) do
+            begin
+              ConvertedText := StringReplace(ConvertedText, RU_TO_EN[i][1], RU_TO_EN[i][3], [rfReplaceAll]);
+            end;
+          end
+          else
+          begin
+            for i := 0 to High(EN_TO_RU) do
+            begin
+              ConvertedText := StringReplace(ConvertedText, EN_TO_RU[i][1], EN_TO_RU[i][3], [rfReplaceAll]);
+            end;
+          end;
+
+          // Put converted text back to clipboard
+          Process.Executable := 'xclip';
+          Process.Parameters.Add('-selection');
+          Process.Parameters.Add('primary');
+          Process.Options := [poWaitOnExit, poUsePipes];
+          Process.Input.Write(ConvertedText[1], Length(ConvertedText));
+          Process.Execute;
+          Process.Parameters.Clear;
+
+          // Simulate Ctrl+V to paste the converted text
+          EmitBuf[1].ie_type := EV_KEY;
+          EmitBuf[1].code := 29; // LEFTCTRL
+          EmitBuf[1].value := 1;
+          EmitBuf[1].time.tv_sec := IETime.tv_sec;
+          EmitBuf[1].time.tv_usec := IETime.tv_usec;
+          IETime.tv_usec := IETime.tv_usec + 200;
+          EmitBuf[2].ie_type := EV_SYN;
+          EmitBuf[2].code := SYN_REPORT;
+          EmitBuf[2].value := 0;
+          EmitBuf[2].time.tv_sec := IETime.tv_sec;
+          EmitBuf[2].time.tv_usec := IETime.tv_usec + 100;
+          fpWrite(vKeyboardFD, EmitBuf[1], sizeof(EmitBuf[1]) * 2);
+
+          EmitBuf[1].ie_type := EV_KEY;
+          EmitBuf[1].code := 47; // V
+          EmitBuf[1].value := 1;
+          EmitBuf[1].time.tv_sec := IETime.tv_sec;
+          EmitBuf[1].time.tv_usec := IETime.tv_usec;
+          IETime.tv_usec := IETime.tv_usec + 200;
+          EmitBuf[2].ie_type := EV_SYN;
+          EmitBuf[2].code := SYN_REPORT;
+          EmitBuf[2].value := 0;
+          EmitBuf[2].time.tv_sec := IETime.tv_sec;
+          EmitBuf[2].time.tv_usec := IETime.tv_usec + 100;
+          fpWrite(vKeyboardFD, EmitBuf[1], sizeof(EmitBuf[1]) * 2);
+
+          EmitBuf[1].ie_type := EV_KEY;
+          EmitBuf[1].code := 47; // V
+          EmitBuf[1].value := 0;
+          EmitBuf[1].time.tv_sec := IETime.tv_sec;
+          EmitBuf[1].time.tv_usec := IETime.tv_usec;
+          IETime.tv_usec := IETime.tv_usec + 200;
+          EmitBuf[2].ie_type := EV_SYN;
+          EmitBuf[2].code := SYN_REPORT;
+          EmitBuf[2].value := 0;
+          EmitBuf[2].time.tv_sec := IETime.tv_sec;
+          EmitBuf[2].time.tv_usec := IETime.tv_usec + 100;
+          fpWrite(vKeyboardFD, EmitBuf[1], sizeof(EmitBuf[1]) * 2);
+
+          EmitBuf[1].ie_type := EV_KEY;
+          EmitBuf[1].code := 29; // LEFTCTRL
+          EmitBuf[1].value := 0;
+          EmitBuf[1].time.tv_sec := IETime.tv_sec;
+          EmitBuf[1].time.tv_usec := IETime.tv_usec;
+          IETime.tv_usec := IETime.tv_usec + 200;
+          EmitBuf[2].ie_type := EV_SYN;
+          EmitBuf[2].code := SYN_REPORT;
+          EmitBuf[2].value := 0;
+          EmitBuf[2].time.tv_sec := IETime.tv_sec;
+          EmitBuf[2].time.tv_usec := IETime.tv_usec + 100;
+          fpWrite(vKeyboardFD, EmitBuf[1], sizeof(EmitBuf[1]) * 2);
+
+          Log(etInfo, 'Converted selected text and pasted', True);
+        end;
+      finally
+        Output.Free;
+        Process.Free;
+      end;
+    end;
+
   begin
     if DaemonMode then
       Log(etInfo, Format('Starting Easy Switcher v%s...', [EASY_SWITCHER_VERSION]), False)
@@ -877,6 +1085,7 @@ var
     KeyIE := Default(input_event);
     KeyBuf := Default(TKeyBuf);
     SetLength(Keys_LS, 2);
+    SetLength(Keys_SEL, 3); // Initialize for Ctrl+Shift+Pause
     vKeyboardSetup := Default(uinput_setup);
     vKeyboardSetup.id.bustype := BUS_USB;
     vKeyboardSetup.id.vendor := $0777;
@@ -908,12 +1117,14 @@ var
         MousePath := ConfigIniFile.ReadString('Easy Switcher', 'mouse', '~');
         StrKeys_LS := ConfigIniFile.ReadString('Easy Switcher', 'layout-switch-key', '-1');
         Key_RPL := StrToInt(ConfigIniFile.ReadString('Easy Switcher', 'replace-key', '0'));
+        StrKeys_SEL := ConfigIniFile.ReadString('Easy Switcher', 'convert-selection-key', '0');
         ReverseMode := StrToBool(ConfigIniFile.ReadString('Easy Switcher', 'reverse-mode', 'False'));
         Delay := StrToInt(ConfigIniFile.ReadString('Easy Switcher', 'delay', '10'));
         SetLength(Keys_LS, SScanf(StrKeys_LS, '%d+%d', [@Keys_LS[0], @Keys_LS[1]]));
+        SetLength(Keys_SEL, SScanf(StrKeys_SEL, '%d+%d+%d', [@Keys_SEL[0], @Keys_SEL[1], @Keys_SEL[2]]));
         if Assigned(ConfigIniFile) then
           FreeAndNil(ConfigIniFile);
-        if ((KeyboardPath = '~') or (MousePath = '~') or (Length(Keys_LS) = 0) or (KEY_RPL = 0)) then
+        if ((KeyboardPath = '~') or (MousePath = '~') or (Length(Keys_LS) = 0) or (Key_RPL = 0)) then
         begin
           Log(etError, 'Error parsing config file.', False);
           Halt(1);
@@ -996,7 +1207,8 @@ var
         begin
           Log(etInfo, Format('input %s %s', [KeyName[KeyIE.code], KeyAction[KeyIE.value]]), True);
           sleep(50);
-          if ((KeyIE.code in Letters) or (KeyIE.code in Shifts) or (KeyIE.code = KEY_RPL)) then
+          if ((KeyIE.code in Letters) or (KeyIE.code in Shifts) or (KeyIE.code = Key_RPL) or
+              (KeyIE.code in [Keys_SEL[0], Keys_SEL[1], Keys_SEL[2]])) then
           begin
             i := Length(KeyBuf);
             SetLength(KeyBuf, i + 1);
@@ -1014,25 +1226,35 @@ var
             Log(etInfo, 'buffer cleared', True);
           end;
           if Length(KeyBuf) > 0 then
-            if ((KeyIE.code = KEY_RPL) and (KeyIE.value = 0)) or
-              ((KeyIE.code in Shifts) and (KeyIE.value = 0)) then
+            if ((KeyIE.code = Key_RPL) and (KeyIE.value = 0)) or
+               ((KeyIE.code in Shifts) and (KeyIE.value = 0)) or
+               ((KeyIE.code = Keys_SEL[2]) and (KeyIE.value = 0)) then
             begin
               BufferAction := GetBufferAction;
               if BufferAction <> KeepBuffer then
               begin
                 Log(etInfo, 'prepare buffer', True);
                 Log(etInfo, '  raw: ' + GetBufferStr, True);
-                PrepareBuffer;
-                Log(etInfo, '  prepared: ' + GetBufferStr, True);
-                if (BufferAction = ReplaceAll) xor ReverseMode then
+                if BufferAction = ConvertSelection then
                 begin
-                  Log(etInfo, 'convert all', True);
-                  Convert(False);
+                  Log(etInfo, 'convert selected text', True);
+                  ConvertSelectedText;
+                  SetLength(KeyBuf, 0);
                 end
                 else
                 begin
-                  Log(etInfo, 'convert word', True);
-                  Convert(True);
+                  PrepareBuffer;
+                  Log(etInfo, '  prepared: ' + GetBufferStr, True);
+                  if (BufferAction = ReplaceAll) xor ReverseMode then
+                  begin
+                    Log(etInfo, 'convert all', True);
+                    Convert(False);
+                  end
+                  else
+                  begin
+                    Log(etInfo, 'convert word', True);
+                    Convert(True);
+                  end;
                 end;
                 fpClose(KeyboardFD);
                 KeyboardFD := fpOpen(KeyboardPath, O_RDONLY or O_SYNC);
